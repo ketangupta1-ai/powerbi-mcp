@@ -40,6 +40,10 @@ function wantsJson(req) {
   return (req.get("accept") || "").includes("application/json");
 }
 
+function powerBiAnalystPageUrl() {
+  return new URL("/power_BI_Analyst", config.frontendBaseUrl).toString();
+}
+
 function createSessionTokenMiddleware() {
   return async (req, res, next) => {
     try {
@@ -58,6 +62,7 @@ function createSessionTokenMiddleware() {
 function registerAuthRoutes(router) {
   router.get("/auth/status", (req, res) => {
     const session = getSession(req);
+    console.log(`[auth/status] authenticated=${!!session?.accessToken} configured=${isAuthConfigured()}`);
     res.json({
       authenticated: !!session?.accessToken,
       userName: session?.userName || null,
@@ -72,11 +77,14 @@ function registerAuthRoutes(router) {
 
     const state = crypto.randomBytes(16).toString("hex");
     setOauthState(res, state);
-    return res.redirect(buildLoginUrl(state));
+    const loginUrl = buildLoginUrl(state);
+    console.log(`[auth/login] redirecting to Microsoft; callback=${config.msRedirectUri}`);
+    return res.redirect(loginUrl);
   });
 
   router.get("/auth/callback", async (req, res) => {
     const { code, state, error, error_description: errorDescription } = req.query || {};
+    console.log(`[auth/callback] received code=${!!code} state=${!!state} error=${error || "none"}`);
     if (error) {
       return res
         .status(400)
@@ -96,7 +104,7 @@ function registerAuthRoutes(router) {
         userName: decodeUserName(tokens.id_token)
       });
       res.clearCookie("oauth_state");
-      return res.redirect("/Power_BI_Analyst");
+      return res.redirect(powerBiAnalystPageUrl());
     } catch (callbackError) {
       return res.status(500).send(`Auth failed: ${callbackError.message}`);
     }
@@ -105,7 +113,7 @@ function registerAuthRoutes(router) {
   router.get("/auth/logout", (req, res) => {
     clearSession(req, res);
     if (wantsJson(req)) return res.json({ ok: true });
-    return res.redirect("/Power_BI_Analyst");
+    return res.redirect(powerBiAnalystPageUrl());
   });
 }
 
@@ -174,6 +182,9 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
       return res.status(400).json({ error: "message is required." });
     }
 
+    const requestId = crypto.randomBytes(4).toString("hex");
+    console.log(`[chat ${requestId}] start: ${message.slice(0, 120)}`);
+
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
@@ -194,7 +205,9 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
       });
 
       res.write("data: [DONE]\n\n");
+      console.log(`[chat ${requestId}] done`);
     } catch (error) {
+      console.error(`[chat ${requestId}] error:`, error);
       const needsAuth = /401|403|unauthorized|forbidden/i.test(error.message);
       res.write(`data: ${JSON.stringify({ error: error.message, needsAuth })}\n\n`);
     } finally {

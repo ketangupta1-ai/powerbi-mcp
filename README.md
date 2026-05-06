@@ -59,7 +59,7 @@ Fill `.env` with your LiteLLM/OpenAI-compatible gateway settings.
 For the browser route, set your Azure redirect URI to the Next.js proxy callback, for example:
 
 ```text
-http://localhost:3000/api/powerbi-mcp/auth/callback
+http://localhost:3000/auth/callback
 ```
 
 ## Run Locally

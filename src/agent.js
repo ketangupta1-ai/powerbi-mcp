@@ -54,11 +54,13 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
     throw new Error("OPENAI_API_KEY is not configured.");
   }
 
+  console.log(`[agent] discovering catalog`);
   const catalog = await discoverSemanticModels(accessToken).catch((error) => ({
     semanticModels: [],
     catalogError: error.message
   }));
 
+  console.log(`[agent] loading MCP tools`);
   const mcpTools = await listMcpTools(accessToken).catch((error) => {
     console.error("[tools] Failed to load Power BI MCP tools:", error.message);
     return [];
@@ -76,6 +78,7 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
 
   for (let iteration = 0; iteration < config.maxAgentIterations; iteration += 1) {
     usage.iterations += 1;
+    console.log(`[agent] iteration ${iteration + 1}, messages=${messages.length}, tools=${tools.length}`);
 
     const response = await openai.chat.completions.create({
       model: config.llmModel,
@@ -97,6 +100,7 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
     }
 
     messages.push(assistantMessage);
+    console.log(`[agent] iteration ${iteration + 1} tool_calls=${assistantMessage.tool_calls?.length || 0}`);
 
     if (!assistantMessage.tool_calls?.length) {
       const text = assistantMessage.content || "";
