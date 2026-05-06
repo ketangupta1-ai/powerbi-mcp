@@ -1,0 +1,19 @@
+{
+  "name": "powerbi-mcp",
+  "version": "0.1.0",
+  "description": "Internal Power BI MCP backend service for Next.js applications.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js && node --check src/agent.js && node --check src/config.js && node --check src/http.js && node --check src/mcpClient.js && node --check src/powerbiCatalog.js && node --check src/security.js && node --check src/sessionStore.js"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "openai": "^4.77.0"
+  }
+}
