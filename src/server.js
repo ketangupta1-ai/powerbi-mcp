@@ -5,6 +5,7 @@ const { runAgentTurn } = require("./agent");
 const { callMcpMethod, executeMcpTool, listMcpTools } = require("./mcpClient");
 const { discoverSemanticModels } = require("./powerbiCatalog");
 const { requireInternalCaller, requirePowerBiToken } = require("./security");
+const { appendUsageLog, normalizeUsage } = require("./usageLogger");
 const {
   buildLoginUrl,
   clearSession,
@@ -189,9 +190,17 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();
+    res.write(": keep-alive\n\n");
+
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(": keep-alive\n\n");
+      }
+    }, 15000);
+    let agentResult = null;
 
     try {
-      await runAgentTurn({
+      agentResult = await runAgentTurn({
         message,
         history,
         accessToken: req.powerBiAccessToken,
@@ -204,13 +213,27 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
         }
       });
 
-      res.write("data: [DONE]\n\n");
+      res.write(`data: ${JSON.stringify({ done: true, usage: normalizeUsage(agentResult.usage) })}\n\n`);
       console.log(`[chat ${requestId}] done`);
     } catch (error) {
       console.error(`[chat ${requestId}] error:`, error);
       const needsAuth = /401|403|unauthorized|forbidden/i.test(error.message);
       res.write(`data: ${JSON.stringify({ error: error.message, needsAuth })}\n\n`);
     } finally {
+      clearInterval(heartbeat);
+      try {
+        const usageLog = await appendUsageLog({
+          requestId,
+          userMessage: message,
+          assistantResponse: agentResult?.assistantResponse || agentResult?.text || "",
+          systemPrompt: agentResult?.systemPrompt || "",
+          rawLlmResponse: agentResult?.rawLlmResponse || null,
+          usage: agentResult?.usage
+        });
+        console.log(`[chat ${requestId}] usage:`, usageLog);
+      } catch (logError) {
+        console.error(`[chat ${requestId}] usage log failed:`, logError);
+      }
       res.end();
     }
   });
@@ -249,4 +272,12 @@ app.listen(config.port, config.host, () => {
   if (!config.openaiApiKey) {
     console.warn("OPENAI_API_KEY is not set; chat endpoints will fail until configured.");
   }
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("UNCAUGHT EXCEPTION:", error);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("UNHANDLED REJECTION at:", promise, "reason:", reason);
 });

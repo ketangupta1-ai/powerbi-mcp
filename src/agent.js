@@ -67,14 +67,16 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
   });
 
   const tools = mcpTools.map(mcpToolToOpenAiTool);
+  const systemPrompt = buildSystemPrompt(catalog);
   const messages = [
-    { role: "system", content: buildSystemPrompt(catalog) },
+    { role: "system", content: systemPrompt },
     ...normalizeHistory(history),
     { role: "user", content: message }
   ];
 
   const usage = { prompt: 0, completion: 0, total: 0, iterations: 0 };
   const startedAt = Date.now();
+  let rawLlmResponse = null;
 
   for (let iteration = 0; iteration < config.maxAgentIterations; iteration += 1) {
     usage.iterations += 1;
@@ -87,6 +89,7 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
       tool_choice: tools.length ? "auto" : undefined,
       stream: false
     });
+    rawLlmResponse = response;
 
     if (response.usage) {
       usage.prompt += response.usage.prompt_tokens || 0;
@@ -107,6 +110,9 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
       await onToken(text);
       return {
         text,
+        assistantResponse: text,
+        systemPrompt,
+        rawLlmResponse,
         usage,
         elapsedMs: Date.now() - startedAt,
         catalog,
@@ -141,6 +147,9 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
   await onToken(text);
   return {
     text,
+    assistantResponse: text,
+    systemPrompt,
+    rawLlmResponse,
     usage,
     elapsedMs: Date.now() - startedAt,
     catalog,
