@@ -224,6 +224,7 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
       try {
         const usageLog = await appendUsageLog({
           requestId,
+          modelUsed: config.llmModel,
           userMessage: message,
           assistantResponse: agentResult?.assistantResponse || agentResult?.text || "",
           systemPrompt: agentResult?.systemPrompt || "",

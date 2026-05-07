@@ -15,6 +15,7 @@ function normalizeUsage(usage) {
 
 async function appendUsageLog({
   requestId,
+  modelUsed,
   userMessage,
   assistantResponse,
   systemPrompt,
@@ -24,6 +25,7 @@ async function appendUsageLog({
   const payload = {
     timestamp: new Date().toISOString(),
     requestId,
+    modelUsed,
     userMessage,
     assistantResponse,
     systemPrompt,
@@ -42,6 +44,7 @@ function formatReadableUsage(payload) {
     "================================================================================",
     `Timestamp        : ${payload.timestamp}`,
     `Request ID       : ${payload.requestId}`,
+    `Model Used       : ${payload.modelUsed || ""}`,
     `Prompt Tokens    : ${payload.promptTokens}`,
     `Completion Tokens: ${payload.completionTokens}`,
     `Total Tokens     : ${payload.totalTokens}`,
