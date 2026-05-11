@@ -145,12 +145,54 @@ async function refreshAccessToken(session) {
   return session.accessToken;
 }
 
+let cachedServicePrincipalToken = null;
+
+async function getServicePrincipalToken() {
+  if (cachedServicePrincipalToken && Date.now() < cachedServicePrincipalToken.expiresAt) {
+    return cachedServicePrincipalToken.accessToken;
+  }
+
+  console.log("[sessionStore] fetching new Service Principal token...");
+  const body = new URLSearchParams({
+    client_id: config.msClientId,
+    client_secret: config.msClientSecret,
+    grant_type: "client_credentials",
+    scope: "https://analysis.windows.net/powerbi/api/.default"
+  });
+
+  const { response, json, text } = await fetchJson(
+    `https://login.microsoftonline.com/${config.msTenantId}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    },
+    config.requestTimeoutMs
+  );
+
+  if (!response.ok) {
+    throw new Error(json?.error_description || `Service Principal token failed: ${response.status} ${text}`);
+  }
+
+  cachedServicePrincipalToken = {
+    accessToken: json.access_token,
+    expiresAt: Date.now() + (json.expires_in - 60) * 1000
+  };
+
+  return cachedServicePrincipalToken.accessToken;
+}
+
 async function getValidSessionToken(req) {
   const session = getSession(req);
-  if (!session?.accessToken) throw new Error("Not authenticated.");
-  if (Date.now() < (session.expiresAt || 0)) return { session, accessToken: session.accessToken };
-  const accessToken = await refreshAccessToken(session);
-  return { session, accessToken };
+  if (session?.accessToken) {
+    if (Date.now() < (session.expiresAt || 0)) return { session, accessToken: session.accessToken };
+    const accessToken = await refreshAccessToken(session);
+    return { session, accessToken };
+  }
+
+  // Fallback to Service Principal if no user session exists
+  const spToken = await getServicePrincipalToken();
+  return { session: null, accessToken: spToken };
 }
 
 module.exports = {
@@ -161,6 +203,7 @@ module.exports = {
   getOauthState,
   getSession,
   getValidSessionToken,
+  getServicePrincipalToken,
   scopes,
   setOauthState,
   setSession
