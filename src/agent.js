@@ -49,21 +49,40 @@ function parseToolArguments(rawArguments) {
   }
 }
 
-async function runAgentTurn({ message, history = [], accessToken, onToken = () => {} }) {
+async function runAgentTurn({ message, history = [], accessToken, onToken = () => {}, trace = null }) {
   if (!config.openaiApiKey) {
     throw new Error("OPENAI_API_KEY is not configured.");
   }
 
   console.log(`[agent] discovering catalog`);
-  const catalog = await discoverSemanticModels(accessToken).catch((error) => ({
-    semanticModels: [],
-    catalogError: error.message
-  }));
+  await trace?.("agent.catalog.start");
+  const catalogStartedAt = Date.now();
+  const catalog = await discoverSemanticModels(accessToken).catch(async (error) => {
+    await trace?.("agent.catalog.error", { durationMs: Date.now() - catalogStartedAt }, error);
+    return {
+      semanticModels: [],
+      catalogError: error.message
+    };
+  });
+  await trace?.("agent.catalog.done", {
+    durationMs: Date.now() - catalogStartedAt,
+    workspaceCount: catalog.workspaces?.length || 0,
+    semanticModelCount: catalog.semanticModels?.filter((model) => model.datasetId).length || 0,
+    hasError: !!catalog.catalogError
+  });
 
   console.log(`[agent] loading MCP tools`);
-  const mcpTools = await listMcpTools(accessToken).catch((error) => {
+  await trace?.("agent.tools.start");
+  const toolsStartedAt = Date.now();
+  const mcpTools = await listMcpTools(accessToken, { trace }).catch(async (error) => {
     console.error("[tools] Failed to load Power BI MCP tools:", error.message);
+    await trace?.("agent.tools.error", { durationMs: Date.now() - toolsStartedAt }, error);
     return [];
+  });
+  await trace?.("agent.tools.done", {
+    durationMs: Date.now() - toolsStartedAt,
+    count: mcpTools.length,
+    names: mcpTools.map((tool) => tool.name)
   });
 
   const tools = mcpTools.map(mcpToolToOpenAiTool);
@@ -81,14 +100,30 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
   for (let iteration = 0; iteration < config.maxAgentIterations; iteration += 1) {
     usage.iterations += 1;
     console.log(`[agent] iteration ${iteration + 1}, messages=${messages.length}, tools=${tools.length}`);
-
-    const response = await openai.chat.completions.create({
+    await trace?.("agent.llm.start", {
+      iteration: iteration + 1,
       model: config.llmModel,
-      messages,
-      tools: tools.length ? tools : undefined,
-      tool_choice: tools.length ? "auto" : undefined,
-      stream: false
+      messageCount: messages.length,
+      toolCount: tools.length
     });
+    const llmStartedAt = Date.now();
+
+    let response;
+    try {
+      response = await openai.chat.completions.create({
+        model: config.llmModel,
+        messages,
+        tools: tools.length ? tools : undefined,
+        tool_choice: tools.length ? "auto" : undefined,
+        stream: false
+      });
+    } catch (error) {
+      await trace?.("agent.llm.error", {
+        iteration: iteration + 1,
+        durationMs: Date.now() - llmStartedAt
+      }, error);
+      throw error;
+    }
     rawLlmResponse = response;
 
     if (response.usage) {
@@ -104,9 +139,23 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
 
     messages.push(assistantMessage);
     console.log(`[agent] iteration ${iteration + 1} tool_calls=${assistantMessage.tool_calls?.length || 0}`);
+    await trace?.("agent.llm.done", {
+      iteration: iteration + 1,
+      durationMs: Date.now() - llmStartedAt,
+      toolCallCount: assistantMessage.tool_calls?.length || 0,
+      contentLength: assistantMessage.content?.length || 0,
+      usage: response.usage
+        ? {
+            promptTokens: response.usage.prompt_tokens || 0,
+            completionTokens: response.usage.completion_tokens || 0,
+            totalTokens: response.usage.total_tokens || 0
+          }
+        : null
+    });
 
     if (!assistantMessage.tool_calls?.length) {
       const text = assistantMessage.content || "";
+      await trace?.("agent.final_answer", { contentLength: text.length });
       await onToken(text);
       return {
         text,
@@ -126,11 +175,28 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
       const toolArgs = parseToolArguments(toolCall.function?.arguments);
 
       let content;
+      const toolStartedAt = Date.now();
       try {
-        const result = await executeMcpTool(toolName, toolArgs, accessToken);
+        await trace?.("agent.tool.start", {
+          iteration: iteration + 1,
+          toolName,
+          argumentKeys: Object.keys(toolArgs)
+        });
+        const result = await executeMcpTool(toolName, toolArgs, accessToken, { trace });
         content = JSON.stringify(result);
+        await trace?.("agent.tool.done", {
+          iteration: iteration + 1,
+          toolName,
+          resultBytes: content.length,
+          durationMs: Date.now() - toolStartedAt
+        });
       } catch (error) {
         content = `Error calling ${toolName}: ${error.message}`;
+        await trace?.("agent.tool.error", {
+          iteration: iteration + 1,
+          toolName,
+          durationMs: Date.now() - toolStartedAt
+        }, error);
       }
 
       toolResultMessages.push({
@@ -144,6 +210,10 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
   }
 
   const text = "I reached the maximum number of reasoning steps. Please try narrowing the question.";
+  await trace?.("agent.max_iterations", {
+    maxAgentIterations: config.maxAgentIterations,
+    elapsedMs: Date.now() - startedAt
+  });
   await onToken(text);
   return {
     text,

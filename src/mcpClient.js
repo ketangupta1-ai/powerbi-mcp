@@ -45,43 +45,66 @@ function parseMcpResponse(text) {
   return JSON.parse(text);
 }
 
-async function callMcpMethod(method, params, accessToken) {
+async function callMcpMethod(method, params, accessToken, options = {}) {
   const body = {
     jsonrpc: "2.0",
     id: crypto.randomUUID(),
     method,
     params: params || {}
   };
+  const { trace } = options;
+  const startedAt = Date.now();
+  await trace?.("mcp.method.start", { method });
 
-  const { response, text } = await fetchText(
-    config.pbiMcpUrl,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-        Authorization: `Bearer ${accessToken}`
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchText(
+      config.pbiMcpUrl,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          Authorization: `Bearer ${accessToken}`
+        },
+        body: JSON.stringify(body)
       },
-      body: JSON.stringify(body)
-    },
-    config.requestTimeoutMs
-  );
+      config.requestTimeoutMs
+    ));
+  } catch (error) {
+    await trace?.("mcp.method.fetch_error", { method, durationMs: Date.now() - startedAt }, error);
+    throw error;
+  }
+  await trace?.("mcp.method.http", {
+    method,
+    status: response.status,
+    ok: response.ok,
+    responseBytes: text.length,
+    durationMs: Date.now() - startedAt
+  });
 
   if (!response.ok) {
-    throw new Error(`MCP ${response.status}: ${text.slice(0, 300)}`);
+    const error = new Error(`MCP ${response.status}: ${text.slice(0, 300)}`);
+    await trace?.("mcp.method.error", { method, durationMs: Date.now() - startedAt }, error);
+    throw error;
   }
 
   let json;
   try {
     json = parseMcpResponse(text);
   } catch (error) {
+    await trace?.("mcp.method.parse_error", { method, durationMs: Date.now() - startedAt }, error);
     throw new Error(`MCP parse failed: ${error.message}`);
   }
 
   if (json.error) {
-    throw new Error(`MCP error: ${json.error.message || JSON.stringify(json.error)}`);
+    const error = new Error(`MCP error: ${json.error.message || JSON.stringify(json.error)}`);
+    await trace?.("mcp.method.error", { method, durationMs: Date.now() - startedAt }, error);
+    throw error;
   }
 
+  await trace?.("mcp.method.done", { method, durationMs: Date.now() - startedAt });
   return json.result;
 }
 
@@ -89,20 +112,24 @@ async function listMcpTools(accessToken, options = {}) {
   const cacheKey = tokenCacheKey(accessToken);
   if (!options.refresh) {
     const cached = getCached(toolsCache, cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      await options.trace?.("mcp.tools.cache_hit", { count: cached.length });
+      return cached;
+    }
   }
 
-  const result = await callMcpMethod("tools/list", {}, accessToken);
+  const result = await callMcpMethod("tools/list", {}, accessToken, { trace: options.trace });
   const tools = Array.isArray(result?.tools) ? result.tools : [];
   setCached(toolsCache, cacheKey, tools);
+  await options.trace?.("mcp.tools.loaded", { count: tools.length });
   return tools;
 }
 
-async function executeMcpTool(name, args, accessToken) {
+async function executeMcpTool(name, args, accessToken, options = {}) {
   return callMcpMethod("tools/call", {
     name,
     arguments: args || {}
-  }, accessToken);
+  }, accessToken, { trace: options.trace });
 }
 
 function mcpToolToOpenAiTool(mcpTool) {
