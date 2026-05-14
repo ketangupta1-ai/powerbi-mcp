@@ -1,4 +1,6 @@
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const { config } = require("./config");
 const { fetchJson } = require("./http");
 
@@ -37,6 +39,48 @@ async function fetchPowerBiJson(url, accessToken) {
 }
 
 async function discoverSemanticModels(accessToken, options = {}) {
+  // Original logic to fetch full catalog
+  const catalog = await fetchFullCatalog(accessToken, options);
+  
+  // Filtering logic
+  try {
+    const filePath = path.join(process.cwd(), config.allowedReportsFile);
+    console.log(`[catalog] checking for allowed reports at: ${filePath}`);
+    if (fs.existsSync(filePath)) {
+      const fileContent = fs.readFileSync(filePath, "utf8");
+      const allowedNames = JSON.parse(fileContent)
+        .map(name => name.trim().toLowerCase());
+      
+      console.log(`[catalog] found allowed_reports.json with ${allowedNames.length} names`);
+      
+      const filtered = (catalog.semanticModels || []).filter(model => {
+        // Handle models that might have datasetName (from fetchFullCatalog) or name (from legacy)
+        const name = (model.datasetName || model.name || "").trim().toLowerCase();
+        const match = allowedNames.includes(name);
+        return match;
+      });
+      
+      console.log(`[catalog] Filtered ${catalog.semanticModels.length} models down to ${filtered.length} allowed models`);
+      if (filtered.length > 0) {
+        console.log(`[catalog] Allowed reports: ${filtered.map(m => m.datasetName || m.name).join(", ")}`);
+      }
+      
+      // Return the catalog object with the filtered list
+      return {
+        ...catalog,
+        semanticModels: filtered
+      };
+    } else {
+      console.log(`[catalog] allowed_reports.json NOT FOUND at ${filePath}`);
+    }
+  } catch (error) {
+    console.error(`[catalog] Failed to read allowed reports file: ${error.message}`);
+  }
+
+  return catalog;
+}
+
+async function fetchFullCatalog(accessToken, options = {}) {
   const cacheKey = tokenCacheKey(accessToken);
   if (!options.refresh) {
     const cached = getCachedCatalog(cacheKey);

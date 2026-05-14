@@ -3,6 +3,7 @@ const { config } = require("./config");
 const { fetchJson } = require("./http");
 
 const sessions = new Map();
+let serviceAccountSession = null;
 
 const scopes = [
   "https://analysis.windows.net/powerbi/api/Dataset.Read.All",
@@ -114,6 +115,46 @@ async function exchangeCodeForTokens(code) {
   return json;
 }
 
+async function authenticateServiceAccount() {
+  if (!config.msAdminUsername || !config.msAdminPassword) {
+    throw new Error("MS_ADMIN_USERNAME or MS_ADMIN_PASSWORD is not configured.");
+  }
+
+  console.log(`[session] authenticating service account: ${config.msAdminUsername}`);
+  const body = new URLSearchParams({
+    client_id: config.msClientId,
+    client_secret: config.msClientSecret,
+    grant_type: "password",
+    username: config.msAdminUsername,
+    password: config.msAdminPassword,
+    scope: scopes
+  });
+
+  const { response, json, text } = await fetchJson(
+    `https://login.microsoftonline.com/${config.msTenantId}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body
+    },
+    config.requestTimeoutMs
+  );
+
+  if (!response.ok) {
+    throw new Error(json?.error_description || `Service account auth failed: ${response.status} ${text}`);
+  }
+
+  serviceAccountSession = {
+    accessToken: json.access_token,
+    refreshToken: json.refresh_token,
+    expiresAt: Date.now() + (json.expires_in - 60) * 1000,
+    userName: decodeUserName(json.id_token) || config.msAdminUsername
+  };
+
+  console.log(`[session] service account authenticated successfully`);
+  return serviceAccountSession;
+}
+
 async function refreshAccessToken(session) {
   if (!session?.refreshToken) throw new Error("No refresh token available.");
 
@@ -146,6 +187,15 @@ async function refreshAccessToken(session) {
 }
 
 async function getValidSessionToken(req) {
+  // If a service account is configured, we prioritize its session.
+  if (config.msAdminUsername && config.msAdminPassword) {
+    if (!serviceAccountSession || Date.now() >= (serviceAccountSession.expiresAt || 0)) {
+      await authenticateServiceAccount();
+    }
+    return { session: serviceAccountSession, accessToken: serviceAccountSession.accessToken };
+  }
+
+  // Fallback to per-user session (original behavior)
   const session = getSession(req);
   if (!session?.accessToken) throw new Error("Not authenticated.");
   if (Date.now() < (session.expiresAt || 0)) return { session, accessToken: session.accessToken };

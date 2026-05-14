@@ -21,11 +21,14 @@ const config = {
   msClientId: process.env.MS_CLIENT_ID || "",
   msClientSecret: process.env.MS_CLIENT_SECRET || "",
   msTenantId: process.env.MS_TENANT_ID || "common",
+  msAdminUsername: process.env.MS_ADMIN_USERNAME || "",
+  msAdminPassword: process.env.MS_ADMIN_PASSWORD || "",
   msRedirectUri: process.env.MS_REDIRECT_URI || "http://localhost:3000/auth/callback",
   frontendBaseUrl: process.env.FRONTEND_BASE_URL || "http://localhost:3000",
   maxAgentIterations: readInteger("MAX_AGENT_ITERATIONS", 8),
   cacheTtlMs: readInteger("MCP_CACHE_TTL_MS", 5 * 60 * 1000),
-  requestTimeoutMs: readInteger("REQUEST_TIMEOUT_MS", 120 * 1000)
+  requestTimeoutMs: readInteger("REQUEST_TIMEOUT_MS", 120 * 1000),
+  allowedReportsFile: "allowed_reports.json"
 };
 
 module.exports = { config };

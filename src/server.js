@@ -78,16 +78,45 @@ function createSessionTokenMiddleware() {
 
 function registerAuthRoutes(router) {
   router.get("/auth/status", (req, res) => {
+    // If service account is configured, we consider it "configured" and "authenticated" if we can get a token.
+    if (config.msAdminUsername && config.msAdminPassword) {
+      return res.json({
+        authenticated: true, // We auto-authenticate
+        userName: config.msAdminUsername,
+        configured: true,
+        mode: "service-account"
+      });
+    }
+
     const session = getSession(req);
     console.log(`[auth/status] authenticated=${!!session?.accessToken} configured=${isAuthConfigured()}`);
     res.json({
       authenticated: !!session?.accessToken,
       userName: session?.userName || null,
-      configured: isAuthConfigured()
+      configured: isAuthConfigured(),
+      mode: "delegated"
     });
   });
 
-  router.get("/auth/login", (req, res) => {
+  router.get("/auth/login", async (req, res) => {
+    // Silent Service Account Login
+    if (config.msAdminUsername && config.msAdminPassword) {
+      try {
+        await getValidSessionToken(req);
+        // We set a dummy local session to ensure the frontend 'sid' cookie is set
+        setSession(res, { 
+          accessToken: "service-account-active",
+          userName: config.msAdminUsername 
+        });
+        const redirectUrl = powerBiAnalystPageUrl();
+        console.log(`[auth/login] silent service account login successful, redirecting to ${redirectUrl}`);
+        return res.redirect(redirectUrl);
+      } catch (error) {
+        console.error(`[auth/login] silent login failed: ${error.message}`);
+        return res.status(500).send(`Silent login failed: ${error.message}`);
+      }
+    }
+
     if (!config.msClientId) {
       return res.status(500).send("MS_CLIENT_ID is not configured.");
     }

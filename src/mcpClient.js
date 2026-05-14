@@ -54,6 +54,15 @@ async function callMcpMethod(method, params, accessToken, options = {}) {
   };
   const { trace } = options;
   const startedAt = Date.now();
+
+  // Log DAX queries for debugging (case-insensitive tool name check)
+  if (method === "tools/call" && params.name?.toLowerCase() === "executequery") {
+    const dax = params.arguments?.query || params.arguments?.daxQueries?.[0];
+    if (dax) {
+      console.log(`\n[DAX QUERY DEBUG]\nTool: ${params.name}\nDataset: ${params.arguments?.datasetId}\nQuery:\n${dax}\n`);
+    }
+  }
+
   await trace?.("mcp.method.start", { method });
 
   let response;

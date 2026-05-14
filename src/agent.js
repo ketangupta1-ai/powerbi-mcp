@@ -25,11 +25,23 @@ Trend reporting:
 - When the user asks for current performance, compare against the equivalent prior period when possible.
 - If prior period data is unavailable, say so briefly.
 
+DOMAIN KNOWLEDGE (BL Metrics):
+- "BL Generation" refers to the initial creation of a Buylead (usually represented by "Total QRF" or "Enquiries Generated").
+- "BL Approving" refers to the verification process (usually represented by "Enquiries Approved" or "Approved QRF").
+- When the user asks for "Generation," do NOT use "Approved" measures.
+- When the user asks for "Approvals," use ONLY "Approved" measures.
+
 Chart rendering:
 - When the user asks for a chart, trend, graph, or visual and the result has chartable data, append one raw JSON line at the end.
 - The line must start with CHART_JSON: followed by valid JSON.
 - Use this shape: CHART_JSON:{"type":"line","title":"...","labels":["..."],"datasets":[{"label":"...","data":[1]}]}
-- Supported chart types are line, bar, and pie.` + catalogToPromptText(catalog);
+- Supported chart types are line, bar, and pie.
+
+STRICT SCOPE RULE:
+- You ONLY have access to the reports explicitly listed in the catalog below.
+- If the user asks for a report, data, or workspace that is NOT in the catalog, you MUST respond: "The requested report does not exist in our system."
+- Do not attempt to guess or search for reports outside this list.
+` + catalogToPromptText(catalog);
 }
 
 function normalizeHistory(history) {
