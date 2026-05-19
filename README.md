@@ -20,6 +20,8 @@ This project does not replicate the Google Ads MCP repo. It follows the same ide
 - `POST /internal/mcp/call`
 - `POST /internal/powerbi/catalog`
 - `POST /internal/chat`
+- `POST /internal/chat/start`
+- `POST /internal/chat/status`
 - `POST /internal/chat/json`
 
 Browser/proxy compatibility routes are also available under `/api/*`:
@@ -32,6 +34,8 @@ Browser/proxy compatibility routes are also available under `/api/*`:
 - `POST /api/mcp/call`
 - `POST /api/powerbi/catalog`
 - `POST /api/chat`
+- `POST /api/chat/start`
+- `POST /api/chat/status`
 - `POST /api/chat/json`
 
 All internal routes accept the user Power BI access token in one of these forms:

@@ -29,7 +29,9 @@ function requireInternalCaller(req, res, next) {
 
   const providedKey = req.get("x-internal-api-key") || "";
   if (!timingSafeEqualString(providedKey, config.internalApiKey)) {
-    return res.status(401).json({ error: "Invalid internal API key." });
+    const error = new Error("Unauthorized internal caller.");
+    error.statusCode = 401;
+    return next(error);
   }
 
   return next();
@@ -51,9 +53,9 @@ function getBearerToken(req) {
 function requirePowerBiToken(req, res, next) {
   const token = getBearerToken(req);
   if (!token) {
-    return res.status(401).json({
-      error: "Power BI access token is required. Send Authorization: Bearer <token>."
-    });
+    const error = new Error("Power BI access token is required.");
+    error.statusCode = 401;
+    return next(error);
   }
 
   req.powerBiAccessToken = token;

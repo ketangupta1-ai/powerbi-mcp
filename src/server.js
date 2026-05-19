@@ -20,6 +20,9 @@ const {
 } = require("./sessionStore");
 
 const app = express();
+const chatJobs = new Map();
+const CHAT_JOB_TTL_MS = 30 * 60 * 1000;
+const CHAT_POLL_AFTER_MS = 2000;
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
@@ -61,6 +64,197 @@ function logAuthRedirect(req, event, details) {
   console.log(`[${event}] redirect ${JSON.stringify({ ...authRequestDetails(req), ...details })}`);
 }
 
+function getErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function buildPublicError(error, requestId) {
+  const errorMessage = getErrorMessage(error);
+  const lowerMessage = errorMessage.toLowerCase();
+  const needsAuth = /401|403|unauthorized|forbidden|not authenticated|access token/.test(lowerMessage);
+
+  let errorType = "internal";
+  let publicMessage = "I could not complete that request. Please try again in a moment.";
+
+  if (needsAuth) {
+    errorType = "auth";
+    publicMessage = "Your session expired. Please sign in again.";
+  } else if (/service account auth failed|aadsts|microsoft auth/i.test(lowerMessage)) {
+    errorType = "auth";
+    publicMessage = `Microsoft authentication failed: ${errorMessage}`;
+    return {
+      error: publicMessage,
+      needsAuth: true,
+      requestId,
+      errorType
+    };
+  } else if (/timeout|timed out|etimedout|aborted/.test(lowerMessage)) {
+    errorType = "timeout";
+    publicMessage = "The request took too long to complete. Please try again with a narrower question.";
+  } else if (/openrouter|litellm|insufficient credits|quota|budget|rate limit|429|402|model_group|fallback/.test(lowerMessage)) {
+    errorType = "llm_provider";
+    publicMessage = "The analytics service is temporarily unable to complete this request. Please try again shortly.";
+  } else if (/mcp|power bi|fabric|pbi|dax|semantic model|executequery/.test(lowerMessage)) {
+    errorType = "powerbi";
+    publicMessage = "Power BI could not complete the data request. Please try again or narrow the question.";
+  }
+
+  return {
+    error: publicMessage,
+    needsAuth,
+    requestId,
+    errorType
+  };
+}
+
+function sendPublicError(req, res, error, options = {}) {
+  const requestId = options.requestId || crypto.randomBytes(4).toString("hex");
+  const publicError = buildPublicError(error, requestId);
+  if (options.publicMessage) publicError.error = options.publicMessage;
+  if (options.errorType) publicError.errorType = options.errorType;
+  if (typeof options.needsAuth === "boolean") publicError.needsAuth = options.needsAuth;
+
+  const context = options.context || `${req.method} ${req.originalUrl || req.url}`;
+  console.error(`[http ${requestId}] ${context} failed:`, error);
+
+  const status = options.status || (publicError.needsAuth ? 401 : 500);
+  if (wantsJson(req)) {
+    return res.status(status).json(publicError);
+  }
+
+  return res.status(status).send(`${publicError.error} Reference ID: ${requestId}.`);
+}
+
+function cleanupChatJobs() {
+  const now = Date.now();
+  for (const [jobId, job] of chatJobs.entries()) {
+    if (job.status === "running") continue;
+    if (now - job.updatedAt > CHAT_JOB_TTL_MS) {
+      chatJobs.delete(jobId);
+    }
+  }
+}
+
+function createChatJob({ requestId, message, history, userName }) {
+  const now = Date.now();
+  return {
+    id: crypto.randomBytes(16).toString("hex"),
+    requestId,
+    status: "queued",
+    message,
+    history: Array.isArray(history) ? history : [],
+    userName,
+    createdAt: now,
+    updatedAt: now,
+    startedAt: null,
+    completedAt: null,
+    partialText: "",
+    result: null,
+    error: null
+  };
+}
+
+function serializeChatJob(job) {
+  const payload = {
+    jobId: job.id,
+    requestId: job.requestId,
+    status: job.status,
+    pollAfterMs: CHAT_POLL_AFTER_MS,
+    createdAt: new Date(job.createdAt).toISOString(),
+    updatedAt: new Date(job.updatedAt).toISOString()
+  };
+
+  if (job.partialText && job.status !== "completed") {
+    payload.partialText = job.partialText;
+  }
+
+  if (job.result) {
+    payload.result = job.result;
+    payload.text = job.result.text;
+  }
+
+  if (job.error) {
+    Object.assign(payload, job.error);
+  }
+
+  return payload;
+}
+
+async function runStoredChatJob({ job, accessToken, trace }) {
+  let agentResult = null;
+  job.status = "running";
+  job.startedAt = Date.now();
+  job.updatedAt = job.startedAt;
+  await trace("chat_poll.job.started", { jobId: job.id });
+
+  try {
+    agentResult = await runAgentTurn({
+      message: job.message,
+      history: job.history,
+      accessToken,
+      trace,
+      onToken: async (text) => {
+        job.partialText += text;
+        job.updatedAt = Date.now();
+      }
+    });
+
+    const text = agentResult.assistantResponse || agentResult.text || "";
+    job.status = "completed";
+    job.result = {
+      text,
+      usage: normalizeUsage(agentResult.usage),
+      elapsedMs: agentResult.elapsedMs
+    };
+    job.completedAt = Date.now();
+    job.updatedAt = job.completedAt;
+    await trace("chat_poll.job.completed", {
+      jobId: job.id,
+      assistantResponseLength: text.length,
+      elapsedMs: agentResult.elapsedMs,
+      usage: normalizeUsage(agentResult.usage)
+    });
+  } catch (error) {
+    const publicError = buildPublicError(error, job.requestId);
+    job.status = "failed";
+    job.error = publicError;
+    job.completedAt = Date.now();
+    job.updatedAt = job.completedAt;
+    console.error(`[chat ${job.requestId}] polling job failed:`, error);
+    await trace("chat_poll.job.failed", {
+      jobId: job.id,
+      needsAuth: publicError.needsAuth,
+      publicErrorType: publicError.errorType
+    }, error);
+  } finally {
+    await trace("usage_log.start");
+    try {
+      const usageLog = await appendUsageLog({
+        requestId: job.requestId,
+        modelUsed: config.llmModel,
+        userMessage: job.message,
+        assistantResponse: agentResult?.assistantResponse || agentResult?.text || job.partialText || "",
+        systemPrompt: agentResult?.systemPrompt || "",
+        rawLlmResponse: agentResult?.rawLlmResponse || null,
+        usage: agentResult?.usage
+      });
+      console.log(`[chat ${job.requestId}] polling usage:`, usageLog);
+      await trace("usage_log.done", {
+        promptTokens: usageLog.promptTokens,
+        completionTokens: usageLog.completionTokens,
+        totalTokens: usageLog.totalTokens,
+        iterations: usageLog.iterations
+      });
+    } catch (logError) {
+      console.error(`[chat ${job.requestId}] polling usage log failed:`, logError);
+      await trace("usage_log.error", {}, logError);
+    }
+  }
+}
+
+const chatJobCleanupInterval = setInterval(cleanupChatJobs, 5 * 60 * 1000);
+chatJobCleanupInterval.unref?.();
+
 function createSessionTokenMiddleware() {
   return async (req, res, next) => {
     try {
@@ -68,8 +262,11 @@ function createSessionTokenMiddleware() {
       req.powerBiAccessToken = accessToken;
       return next();
     } catch (error) {
-      return res.status(401).json({
-        error: "Not authenticated. Please sign in.",
+      return sendPublicError(req, res, error, {
+        status: 401,
+        context: "session token",
+        publicMessage: "Your session expired. Please sign in again.",
+        errorType: "auth",
         needsAuth: true
       });
     }
@@ -112,13 +309,18 @@ function registerAuthRoutes(router) {
         console.log(`[auth/login] silent service account login successful, redirecting to ${redirectUrl}`);
         return res.redirect(redirectUrl);
       } catch (error) {
-        console.error(`[auth/login] silent login failed: ${error.message}`);
-        return res.status(500).send(`Silent login failed: ${error.message}`);
+        return sendPublicError(req, res, error, {
+          status: 500,
+          context: "auth/login silent login"
+        });
       }
     }
 
     if (!config.msClientId) {
-      return res.status(500).send("MS_CLIENT_ID is not configured.");
+      return sendPublicError(req, res, new Error("MS_CLIENT_ID is not configured."), {
+        status: 500,
+        context: "auth/login configuration"
+      });
     }
 
     const state = crypto.randomBytes(16).toString("hex");
@@ -142,13 +344,28 @@ function registerAuthRoutes(router) {
       )}`
     );
     if (error) {
-      return res
-        .status(400)
-        .send(`Auth error: ${error}. ${errorDescription || ""}`);
+      return sendPublicError(
+        req,
+        res,
+        new Error(`Microsoft auth error: ${error}. ${errorDescription || ""}`),
+        {
+          status: 400,
+          context: "auth/callback microsoft error",
+          publicMessage: "Microsoft sign-in could not be completed. Please try again.",
+          errorType: "auth",
+          needsAuth: true
+        }
+      );
     }
 
     if (!code || getOauthState(req) !== state) {
-      return res.status(400).send("Invalid OAuth state. Please try signing in again.");
+      return sendPublicError(req, res, new Error("Invalid OAuth state."), {
+        status: 400,
+        context: "auth/callback state validation",
+        publicMessage: "Sign-in could not be verified. Please try again.",
+        errorType: "auth",
+        needsAuth: true
+      });
     }
 
     try {
@@ -167,7 +384,13 @@ function registerAuthRoutes(router) {
       });
       return res.redirect(redirectUrl);
     } catch (callbackError) {
-      return res.status(500).send(`Auth failed: ${callbackError.message}`);
+      return sendPublicError(req, res, callbackError, {
+        status: 500,
+        context: "auth/callback token exchange",
+        publicMessage: "Microsoft sign-in could not be completed. Please try again.",
+        errorType: "auth",
+        needsAuth: true
+      });
     }
   });
 
@@ -202,7 +425,12 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
       }
 
       if (!name) {
-        return res.status(400).json({ error: "Provide either method or tool name." });
+        return sendPublicError(req, res, new Error("Missing MCP tool name or method."), {
+          status: 400,
+          context: "mcp/call validation",
+          publicMessage: "The request could not be processed. Please try again.",
+          errorType: "bad_request"
+        });
       }
 
       const result = await executeMcpTool(name, args || {}, req.powerBiAccessToken);
@@ -227,7 +455,12 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
     try {
       const { message, history } = req.body || {};
       if (!message || typeof message !== "string") {
-        return res.status(400).json({ error: "message is required." });
+        return sendPublicError(req, res, new Error("message is required."), {
+          status: 400,
+          context: "chat/json validation",
+          publicMessage: "Please enter a message and try again.",
+          errorType: "bad_request"
+        });
       }
 
       const result = await runAgentTurn({
@@ -240,6 +473,87 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
     } catch (error) {
       return next(error);
     }
+  });
+
+  router.post("/chat/start", tokenMiddleware, async (req, res) => {
+    const { message, history } = req.body || {};
+    const requestId = crypto.randomBytes(4).toString("hex");
+    const trace = createTraceLogger(requestId);
+    await trace("chat_poll.received", {
+      route: req.originalUrl || req.url,
+      method: req.method,
+      messageLength: typeof message === "string" ? message.length : 0,
+      historyCount: Array.isArray(history) ? history.length : 0,
+      authenticated: true,
+      userName: getSession(req)?.userName || null,
+      model: config.llmModel
+    });
+
+    if (!message || typeof message !== "string") {
+      console.warn(`[chat ${requestId}] polling rejected: message is required`);
+      await trace("chat_poll.rejected", { reason: "message is required" });
+      return sendPublicError(req, res, new Error("message is required."), {
+        status: 400,
+        requestId,
+        context: "chat polling validation",
+        publicMessage: "Please enter a message and try again.",
+        errorType: "bad_request"
+      });
+    }
+
+    cleanupChatJobs();
+    const accessToken = req.powerBiAccessToken;
+    const userName = getSession(req)?.userName || null;
+    const job = createChatJob({
+      requestId,
+      message,
+      history,
+      userName
+    });
+    chatJobs.set(job.id, job);
+
+    console.log(`[chat ${requestId}] polling job queued: ${message.slice(0, 120)}`);
+    res.status(202).json(serializeChatJob(job));
+
+    setImmediate(() => {
+      void runStoredChatJob({
+        job,
+        accessToken,
+        trace
+      }).catch((error) => {
+        console.error(`[chat ${requestId}] polling job crashed:`, error);
+        job.status = "failed";
+        job.error = buildPublicError(error, requestId);
+        job.completedAt = Date.now();
+        job.updatedAt = job.completedAt;
+      });
+    });
+  });
+
+  router.post("/chat/status", tokenMiddleware, async (req, res) => {
+    const { jobId } = req.body || {};
+    cleanupChatJobs();
+
+    if (!jobId || typeof jobId !== "string") {
+      return sendPublicError(req, res, new Error("jobId is required."), {
+        status: 400,
+        context: "chat polling status validation",
+        publicMessage: "The request could not be processed. Please try again.",
+        errorType: "bad_request"
+      });
+    }
+
+    const job = chatJobs.get(jobId);
+    if (!job) {
+      return sendPublicError(req, res, new Error(`Chat job not found: ${jobId}`), {
+        status: 404,
+        context: "chat polling status lookup",
+        publicMessage: "That analysis request is no longer available. Please run it again.",
+        errorType: "not_found"
+      });
+    }
+
+    return res.json(serializeChatJob(job));
   });
 
   router.post("/chat", tokenMiddleware, async (req, res) => {
@@ -258,7 +572,13 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
     if (!message || typeof message !== "string") {
       console.warn(`[chat ${requestId}] rejected: message is required`);
       await trace("chat.rejected", { reason: "message is required" });
-      return res.status(400).json({ error: "message is required." });
+      return sendPublicError(req, res, new Error("message is required."), {
+        status: 400,
+        requestId,
+        context: "chat validation",
+        publicMessage: "Please enter a message and try again.",
+        errorType: "bad_request"
+      });
     }
 
     console.log(`[chat ${requestId}] start: ${message.slice(0, 120)}`);
@@ -326,10 +646,12 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
       });
     } catch (error) {
       console.error(`[chat ${requestId}] error:`, error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const needsAuth = /401|403|unauthorized|forbidden/i.test(errorMessage);
-      await trace("chat.error", { needsAuth }, error);
-      res.write(`data: ${JSON.stringify({ error: errorMessage, needsAuth })}\n\n`);
+      const publicError = buildPublicError(error, requestId);
+      await trace("chat.error", {
+        needsAuth: publicError.needsAuth,
+        publicErrorType: publicError.errorType
+      }, error);
+      res.write(`data: ${JSON.stringify(publicError)}\n\n`);
     } finally {
       clearInterval(heartbeat);
       console.log(`[chat ${requestId}] finalizing usage log`);
@@ -375,14 +697,25 @@ registerPowerBiRoutes(api, createSessionTokenMiddleware());
 app.use("/api", api);
 
 app.use((req, res) => {
-  res.status(404).json({ error: "Not found." });
+  return sendPublicError(req, res, new Error(`Route not found: ${req.method} ${req.originalUrl || req.url}`), {
+    status: 404,
+    context: "route not found",
+    publicMessage: "The requested service endpoint was not found.",
+    errorType: "not_found"
+  });
 });
 
 app.use((error, req, res, next) => {
-  const status = /401|unauthorized/i.test(error.message) ? 401 : 500;
-  const payload = { error: error.message };
-  if (config.nodeEnv !== "production") payload.stack = error.stack;
-  res.status(status).json(payload);
+  const requestId = crypto.randomBytes(4).toString("hex");
+  const publicError = buildPublicError(error, requestId);
+  const errorStatus = Number(error?.statusCode || error?.status);
+  const status = Number.isInteger(errorStatus) && errorStatus >= 400 && errorStatus < 600
+    ? errorStatus
+    : publicError.needsAuth
+      ? 401
+      : 500;
+  console.error(`[http ${requestId}] error:`, error);
+  res.status(status).json(publicError);
 });
 
 app.listen(config.port, config.host, () => {
