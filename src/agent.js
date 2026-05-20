@@ -84,9 +84,10 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
     { role: "user", content: message }
   ];
 
-  const usage = { prompt: 0, completion: 0, total: 0, iterations: 0 };
+  const usage = { prompt: 0, completion: 0, total: 0, cached: 0, iterations: 0 };
   const startedAt = Date.now();
   let rawLlmResponse = null;
+  let finalQuery = null;
 
   for (let iteration = 0; iteration < config.maxAgentIterations; iteration += 1) {
     usage.iterations += 1;
@@ -121,6 +122,9 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
       usage.prompt += response.usage.prompt_tokens || 0;
       usage.completion += response.usage.completion_tokens || 0;
       usage.total += response.usage.total_tokens || 0;
+      if (response.usage.prompt_tokens_details?.cached_tokens) {
+        usage.cached += response.usage.prompt_tokens_details.cached_tokens;
+      }
     }
 
     const assistantMessage = response.choices?.[0]?.message;
@@ -156,7 +160,8 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
         usage,
         elapsedMs: Date.now() - startedAt,
         catalog,
-        tools: mcpTools.map((tool) => tool.name)
+        tools: mcpTools.map((tool) => tool.name),
+        finalQuery
       };
     }
 
@@ -164,6 +169,10 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
     for (const toolCall of assistantMessage.tool_calls) {
       const toolName = toolCall.function?.name;
       const toolArgs = parseToolArguments(toolCall.function?.arguments);
+
+      if (toolName?.toLowerCase() === "executequery") {
+        finalQuery = toolArgs?.query || toolArgs?.daxQueries?.[0] || null;
+      }
 
       let content;
       const toolStartedAt = Date.now();
@@ -215,7 +224,8 @@ async function runAgentTurn({ message, history = [], accessToken, onToken = () =
     elapsedMs: Date.now() - startedAt,
     catalog,
     tools: mcpTools.map((tool) => tool.name),
-    maxIterationsReached: true
+    maxIterationsReached: true,
+    finalQuery
   };
 }
 

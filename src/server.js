@@ -6,7 +6,7 @@ const { callMcpMethod, executeMcpTool, listMcpTools } = require("./mcpClient");
 const { discoverSemanticModels } = require("./powerbiCatalog");
 const { requireInternalCaller, requirePowerBiToken } = require("./security");
 const { createTraceLogger } = require("./traceLogger");
-const { appendUsageLog, normalizeUsage } = require("./usageLogger");
+const { appendUsageLog, normalizeUsage, formatReadableUsage } = require("./usageLogger");
 const {
   buildLoginUrl,
   clearSession,
@@ -236,9 +236,15 @@ async function runStoredChatJob({ job, accessToken, trace }) {
         assistantResponse: agentResult?.assistantResponse || agentResult?.text || job.partialText || "",
         systemPrompt: agentResult?.systemPrompt || "",
         rawLlmResponse: agentResult?.rawLlmResponse || null,
-        usage: agentResult?.usage
+        usage: agentResult?.usage,
+        finalQuery: agentResult?.finalQuery,
+        responseTimeMs: agentResult?.elapsedMs
       });
       console.log(`[chat ${job.requestId}] polling usage:`, usageLog);
+      if (job.status === "completed" && job.result) {
+        job.result.formattedLog = formatReadableUsage(usageLog);
+        job.result.usageLog = usageLog;
+      }
       await trace("usage_log.done", {
         promptTokens: usageLog.promptTokens,
         completionTokens: usageLog.completionTokens,
@@ -664,7 +670,9 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
           assistantResponse: agentResult?.assistantResponse || agentResult?.text || "",
           systemPrompt: agentResult?.systemPrompt || "",
           rawLlmResponse: agentResult?.rawLlmResponse || null,
-          usage: agentResult?.usage
+          usage: agentResult?.usage,
+          finalQuery: agentResult?.finalQuery,
+          responseTimeMs: agentResult?.elapsedMs
         });
         console.log(`[chat ${requestId}] usage:`, usageLog);
         await trace("usage_log.done", {
