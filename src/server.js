@@ -135,7 +135,7 @@ function cleanupChatJobs() {
   }
 }
 
-function createChatJob({ requestId, message, history, userName }) {
+function createChatJob({ requestId, message, history, userName, teamContext }) {
   const now = Date.now();
   return {
     id: crypto.randomBytes(16).toString("hex"),
@@ -144,6 +144,7 @@ function createChatJob({ requestId, message, history, userName }) {
     message,
     history: Array.isArray(history) ? history : [],
     userName,
+    teamContext,
     createdAt: now,
     updatedAt: now,
     startedAt: null,
@@ -191,6 +192,7 @@ async function runStoredChatJob({ job, accessToken, trace }) {
     agentResult = await runAgentTurn({
       message: job.message,
       history: job.history,
+      teamContext: job.teamContext,
       accessToken,
       trace,
       onToken: async (text) => {
@@ -449,7 +451,8 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
   router.post("/powerbi/catalog", tokenMiddleware, async (req, res, next) => {
     try {
       const catalog = await discoverSemanticModels(req.powerBiAccessToken, {
-        refresh: !!req.body?.refresh
+        refresh: !!req.body?.refresh,
+        teamContext: req.body?.teamContext
       });
       res.json(catalog);
     } catch (error) {
@@ -472,6 +475,7 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
       const result = await runAgentTurn({
         message,
         history,
+        teamContext: req.body?.teamContext,
         accessToken: req.powerBiAccessToken
       });
 
@@ -514,7 +518,8 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
       requestId,
       message,
       history,
-      userName
+      userName,
+      teamContext: req.body?.teamContext
     });
     chatJobs.set(job.id, job);
 
@@ -536,8 +541,8 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
     });
   });
 
-  router.post("/chat/status", tokenMiddleware, async (req, res) => {
-    const { jobId } = req.body || {};
+  const handleChatStatus = async (req, res) => {
+    const jobId = req.method === "POST" ? (req.body?.jobId) : (req.query?.jobId);
     cleanupChatJobs();
 
     if (!jobId || typeof jobId !== "string") {
@@ -560,7 +565,10 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
     }
 
     return res.json(serializeChatJob(job));
-  });
+  };
+
+  router.post("/chat/status", tokenMiddleware, handleChatStatus);
+  router.get("/chat/status", tokenMiddleware, handleChatStatus);
 
   router.post("/chat", tokenMiddleware, async (req, res) => {
     const { message, history } = req.body || {};
@@ -630,6 +638,7 @@ function registerPowerBiRoutes(router, tokenMiddleware) {
       agentResult = await runAgentTurn({
         message,
         history,
+        teamContext: req.body?.teamContext,
         accessToken: req.powerBiAccessToken,
         trace,
         onToken: async (text) => {

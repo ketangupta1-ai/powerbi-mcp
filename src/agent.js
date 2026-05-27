@@ -40,15 +40,15 @@ function parseToolArguments(rawArguments) {
   }
 }
 
-async function runAgentTurn({ message, history = [], accessToken, onToken = () => {}, trace = null }) {
+async function runAgentTurn({ message, history = [], teamContext, accessToken, onToken = () => {}, trace = null }) {
   if (!config.openaiApiKey) {
     throw new Error("OPENAI_API_KEY is not configured.");
   }
 
-  console.log(`[agent] discovering catalog`);
+  console.log(`[agent] discovering catalog for teamContext: ${teamContext}`);
   await trace?.("agent.catalog.start");
   const catalogStartedAt = Date.now();
-  const catalog = await discoverSemanticModels(accessToken).catch(async (error) => {
+  const catalog = await discoverSemanticModels(accessToken, { teamContext }).catch(async (error) => {
     await trace?.("agent.catalog.error", { durationMs: Date.now() - catalogStartedAt }, error);
     return {
       semanticModels: [],

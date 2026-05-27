@@ -1,5 +1,11 @@
-[
-  "product Ads Daily",
-  "Product Ads Report",
-  "End to End Organic-Ad Monthly"
-]
+{
+  "foreign team report": [
+    "Foreign analytics",
+    "Foreign Analytics Monthly"
+  ],
+  "google ads team report": [
+    "product Ads Daily",
+    "Product Ads Report",
+    "End to End Organic-Ad Monthly"
+  ]
+}

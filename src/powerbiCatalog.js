@@ -48,10 +48,26 @@ async function discoverSemanticModels(accessToken, options = {}) {
     console.log(`[catalog] checking for allowed reports at: ${filePath}`);
     if (fs.existsSync(filePath)) {
       const fileContent = fs.readFileSync(filePath, "utf8");
-      const allowedNames = JSON.parse(fileContent)
-        .map(name => name.trim().toLowerCase());
+      const reportsMapping = JSON.parse(fileContent);
       
-      console.log(`[catalog] found allowed_reports.json with ${allowedNames.length} names`);
+      const teamContext = options.teamContext;
+      let allowedNames = [];
+
+      if (teamContext && reportsMapping[teamContext]) {
+        allowedNames = reportsMapping[teamContext].map(name => name.trim().toLowerCase());
+        console.log(`[catalog] found allowed_reports.json with ${allowedNames.length} names for team: ${teamContext}`);
+      } else {
+        // If no context or invalid context, maybe collect all? Or none?
+        // Let's collect all just in case, or none.
+        if (Array.isArray(reportsMapping)) {
+            allowedNames = reportsMapping.map(name => name.trim().toLowerCase());
+        } else {
+            Object.values(reportsMapping).forEach(arr => {
+                allowedNames = allowedNames.concat(arr.map(name => name.trim().toLowerCase()));
+            });
+        }
+        console.log(`[catalog] found allowed_reports.json with ${allowedNames.length} names total (no specific team context matched)`);
+      }
       
       const filtered = (catalog.semanticModels || []).filter(model => {
         // Handle models that might have datasetName (from fetchFullCatalog) or name (from legacy)
